@@ -1,0 +1,16 @@
+apiVersion: v2
+name: janusgraph
+version: 0.1.0
+kubeVersion: '>= 1.14.0-0'
+description: JanusGraph for use in SentinelOne.
+type: application
+keywords:
+  - janusgraph
+  - sentinelone
+home: https://github.com/Sentinel-One/janusgraph
+sources:
+  - https://github.com/Sentinel-One/janusgraph
+maintainers:
+  - name: Petr Czepiec
+    email: petr.czepiec@sentinelone.com
+appVersion: 0.6.2
