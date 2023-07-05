@@ -1,0 +1,215 @@
+global:
+  s1:
+    env: dev
+    cloud: aws
+    region: us-east-1
+    domain: s1.guru
+    cluster: yukon
+    mode: defult
+    gcpProjectId: ""
+
+# -- Override the name of the chart
+nameOverride: ""
+
+# -- Override the default fully qualified app name
+fullnameOverride: ""
+
+# -- [Registry secret][k8s-registry] (imagePullSecrets of a pod, see example in
+# [values.yaml])
+imagePullSecrets:
+- name: registry-credentials
+
+janusgraph:
+
+  # -- Image repository
+  repository: artifactory.eng.sentinelone.tech/docker-dev/janusgraph/janusgraph
+  # -- Image tag
+  tag: "1.0.2-f419c93"
+
+  # -- [Image pull policy][k8s-imagepull] (imagePullPolicy of a container)
+  pullPolicy: IfNotPresent
+  init:
+    repository: artifactory.eng.sentinelone.tech/docker-remote/busybox
+    tag: "1.28"
+  port: 8182
+
+  # -- _janusgraph deployment_ annotations
+  annotations: {}
+
+  # -- Number of _janusgraph deployment_ replicas
+  replicaCount: 1
+
+  # -- _janusgraph deployment_ pod annotations
+  podAnnotations: {}
+
+  # -- _janusgraph deployment_ pod [affinity][k8s-affinity]
+  affinity: {}
+
+  # -- _janusgraph deployment_ container [lifecycle hooks][k8s-lifecycle]
+  lifecycle: {}
+
+  # -- _janusgraph deployment_ container [resources][k8s-resources]
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "8Gi"
+      cpu: "2000m"
+
+  securityContext: {}
+
+  podSecurityContext:
+    fsGroup: 999
+    runAsUser: 0
+
+  ports:
+  - name: janus
+    protocol: TCP
+    containerPort: 8182
+  - name: metrics
+    protocol: TCP
+    containerPort: 8090
+
+  env: |
+
+  # -- _janusgraph deployment_ pod [node selector][k8s-nodeselector]
+  nodeSelector: {}
+
+  # -- _janusgraph deployment_ pod [tolerations][k8s-tolerations]
+  tolerations: []
+
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+
+  service:
+
+    # -- _janusgraph service_ annotations
+    annotations: {}
+
+    # -- (int) _janusgraph service_ node port
+    nodePort: null
+
+    # -- _janusgraph service_ port
+    port: 80
+
+    # -- _janusgraph service_ [type][k8s-servicetype]
+    type: ClusterIP
+
+  auth:
+    enabled: true
+
+  livenessProbe: {}
+  #   exec:
+  #     command:
+  #     - cat
+  #     - /tmp/healthy
+  #   initialDelaySeconds: 5
+  #   periodSeconds: 5
+
+  startupProbe: {}
+  #   httpGet:
+  #     path: /healthz
+  #     port: liveness-port
+  #   failureThreshold: 30
+  #   periodSeconds: 10
+
+  readinessProbe:
+    exec:
+      command: [gremlin.sh, -e, scripts/readiness.groovy]
+    initialDelaySeconds: 15
+    periodSeconds: 15
+    timeoutSeconds: 15
+
+  ingress:
+    enabled: true
+    annotations: {}
+    serviceFqdn: "{{ .Release.Name }}-{{ .Values.global.s1.region }}-{{ .Values.global.s1.env }}.{{ .Values.global.s1.fqdnDomainName }}"
+
+########################################## Cassandra configuration  ##########################################
+cassandra:
+  # -- cassandra service_ enable or disable
+  enabled: false
+
+  # -- flag if cassandra will be deployed in same helm release with janusgraph
+  commonRelease: false
+
+  # -- cassandra service_ in cluster address
+  externalAddr: ""
+  port: 9042
+
+  # -- cassandra service_ init container that will create keyspace and tables for janusgraph
+  init:
+    repository: artifactory.eng.sentinelone.tech/docker-prod/cassandra/cass-management-api-403-v0137
+    tag: 2.0.1
+
+  cassandra:
+    auth:
+      superuser:
+        secret: ""
+        secretsManagerPath: ""
+
+  # -- cassandra service_  janusgraph keyspaces
+  keyspace:
+    credentials: credentials
+    storage: janusgraph_store
+
+########################################## Opensearch configuration ###########################################
+opensearch:
+  # -- opensearch service_ enable or disable
+  enabled: false
+
+  # -- flag if opensearch will be deployed in same helm release with janusgraph
+  commonRelease: false
+
+  # -- opensearch service_ in cluster address
+  externalAddr: ""
+  port: 9200
+
+  # -- opensearch service_ init container that will check opensearch readiness
+  init:
+    repository: artifactory.eng.sentinelone.tech/docker-dev/dbap-utils/k8s-util
+    tag: 0.1.0
+
+  credsSecretName: ""
+  credsSecretManagerPath: ""
+
+  # -- opensearch clusterName
+  openSearchClusterName: ""
+
+########################################## GUI Configuration TODO ###########################################
+gui:
+  enabled: true
+  repository: artifactory.eng.sentinelone.tech/docker-dev/janusgraph/janusgraph-gui
+  tag: 1.0.1-fb48e99
+  pullPolicy: IfNotPresent
+
+########################################## S1 Configuration custom resources ###########################################
+# Helm hooks configurations
+enableNamespaceAnnotation: true
+enableHookAdminPassCreate: true
+iamRoleName: "{{ .Values.global.s1.region }}-{{ (eq .Values.global.s1.env \"prod\") | ternary \"prod\" \"dev\" }}-janusgraph-create-secrets-role"
+namespaceIamRolePermitted: "{{ .Values.global.s1.region }}-{{ (eq .Values.global.s1.env \"prod\") | ternary \"prod\" \"dev\" }}-janusgraph-create-secrets-role"
+hooks:
+  # as the hooks also run on init, the `component` label isn't sent and when left blank it generate an error.
+  #  we take the "common" labels and merge them into a map where we add at the end the missing label.
+
+  # Creation of the opensearch admin creds secrets as part of the deployment process
+  passwordCreate:
+    image:
+      aws: artifactory.eng.sentinelone.tech/docker-prod/dbap-utils/helm-create-pass-aws:0.1.0
+      gcp: artifactory.eng.sentinelone.tech/docker-prod/dbap-utils/helm-create-pass-gcp:0.1.0
+    backoff: 3
+    ttlForCleanup: 60
+    imagePullSecrets:
+    - name: registry-credentials
+
+  # configuration for the hook which annotates the namespace with kiam annotations
+  annotateNamespace:
+    image: "artifactory.eng.sentinelone.tech/docker-remote/line/kubectl-kustomize"
+    tag: 1.24.1-4.5.4
+    imagePullSecrets:
+    - name: registry-credentials

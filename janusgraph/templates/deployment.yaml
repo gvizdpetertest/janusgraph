@@ -1,0 +1,331 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "janusgraph.fullname" . }}
+  annotations:
+    {{- toYaml .Values.janusgraph.annotations | nindent 4 }}
+  labels:
+    {{- include "janusgraph.labels" . | nindent 4 }}
+spec:
+  replicas: {{ toYaml .Values.janusgraph.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "janusgraph.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- /* toYaml .Values.janusgraph.podAnnotations | nindent 8 */}}
+        checksum/template.janusgrpah.cm.yaml: {{ tpl (.Files.Get "template/janusgrpah/cm.yaml") . | sha256sum }}
+      labels:
+        {{- include "janusgraph.selectorLabels" . | nindent 8 }}
+        {{- include "janusgraph.podLabels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      {{- with .Values.janusgraph.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.janusgraph.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.janusgraph.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.janusgraph.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      initContainers:
+      {{- if .Values.opensearch.enabled }}
+      - name: a-opensearch-check
+        image: {{ .Values.opensearch.init.repository }}:{{ .Values.opensearch.init.tag }}
+        command:
+        - bash
+        args:
+        - -c
+        - |
+          counter=1
+
+          while [[ $counter -lt 30 ]];
+          do
+              {{- if .Values.opensearch.credsSecretName }}
+              status=$(curl -ks -XGET https://{{ include "opensearchAddr" . }}:{{ .Values.opensearch.port }}/_cluster/health -u $OPENSEARCH_USER:$OPENSEARCH_PASSWORD | jq -r .status)
+              {{ else }}
+              status=$(curl -ks -XGET https://{{ include "opensearchAddr" . }}:{{ .Values.opensearch.port }}/_cluster/health | jq -r .status)
+              {{- end }}
+
+              is_running=$(echo $?)
+
+              if [[ "${is_running}" -eq 0 ]] ; then
+                echo "Connected to Opensearch, continue..."
+
+                if [[ "${status}" == "green" ]]; then
+                  echo "[INFO] Opensearch status: ${status}"
+                  exit 0
+                else
+                  echo "[WARN] Opensearch status: ${status}, try it again in ${counter}sec."
+                fi
+              else
+                echo "[ERROR] Cannot connect to openearch, try it again in ${counter}sec."
+              fi
+
+              sleep $counter
+              ((counter++))
+          done
+
+          echo "[ERROR] not connected to https://{{ include "opensearchAddr" . }}:{{ .Values.opensearch.port }}"
+          exit 1
+
+        env:
+        {{- if .Values.opensearch.credsSecretName }}
+        - name: OPENSEARCH_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.opensearch.credsSecretName }}
+              key: ADMIN_USERNAME
+        - name: OPENSEARCH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.opensearch.credsSecretName }}
+              key: ADMIN_PASSWORD
+        {{ end }}
+      {{ end }}
+
+       {{if .Values.cassandra.enabled }}
+      - name: a-cassandra-check
+        workingDir: /opt/cassandra/bin
+        image: {{ .Values.cassandra.init.repository }}:{{ .Values.cassandra.init.tag }}
+        command:
+        - bash
+        args:
+        - -c
+        - |
+          counter=1
+          is_running=1
+
+          while [[ $counter -lt 30 ]];
+          do
+              {{- if .Values.cassandra.cassandra.auth.superuser.secret }}
+              ./cqlsh -u $CASSANDRA_USERNAME -p $CASSANDRA_PASSWORD -e "DESC keyspaces;" {{ include "cassandraAddr" . }} {{ .Values.cassandra.port }}
+              {{ else }}
+              ./cqlsh -e "DESC keyspaces;"  {{ include "cassandraAddr" . }} {{ .Values.cassandra.port }}
+              {{- end }}
+              is_running=$(echo $?)
+
+              if [[ "${is_running}" -eq 0 ]] ; then
+                echo "Connected to cassandra, continue..."
+                exit 0
+              else
+                echo "Cassandra is not running, try it again in ${counter}sec."
+              fi
+
+              sleep $counter
+              ((counter++))
+          done
+
+          echo "[ERROR] not connected to {{ include "cassandraAddr" . }} {{ .Values.cassandra.port }}"
+          exit 1
+        env:
+          {{- if .Values.cassandra.cassandra.auth.superuser.secret }}
+          - name: CASSANDRA_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.cassandra.cassandra.auth.superuser.secret }}
+                key: username
+
+          - name: CASSANDRA_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.cassandra.cassandra.auth.superuser.secret }}
+                key: password
+          {{ end }}
+
+      - name: cassandra-init
+        image: {{ .Values.cassandra.init.repository }}:{{ .Values.cassandra.init.tag }}
+        workingDir: /opt/cassandra/bin
+        command:
+          - bash
+        args:
+          - -c
+          {{ if .Values.cassandra.cassandra.auth.superuser.secret }}
+          - |
+            ./cqlsh -u $CASSANDRA_USERNAME -p $CASSANDRA_PASSWORD -f /init-script/init-db.sql {{ include "cassandraAddr" . }} {{ .Values.cassandra.port }}
+          {{ else }}
+          - |
+            ./cqlsh -f /init-script/init-db.sql {{ include "cassandraAddr" . }} {{ .Values.cassandra.port }}
+          {{ end }}
+
+        volumeMounts:
+        - name: config
+          mountPath: /init-script/init-db.sql
+          subPath: init-db.sql
+
+        env:
+          {{- if .Values.cassandra.cassandra.auth.superuser.secret }}
+          - name: CASSANDRA_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.cassandra.cassandra.auth.superuser.secret }}
+                key: username
+
+          - name: CASSANDRA_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.cassandra.cassandra.auth.superuser.secret }}
+                key: password
+          {{ end }}
+      {{- end }}
+
+      - name: init
+        image: {{ .Values.janusgraph.init.repository }}:{{ .Values.janusgraph.init.tag }}
+        command: ['sh', '-c', 'cp /conf/* /janusgraph && chown -R 999:999 /janusgraph']
+        volumeMounts:
+        - name: config-folder
+          mountPath: /janusgraph
+        - name: config
+          mountPath: /conf/janusgraph.properties
+          subPath: janusgraph.properties
+        - name: config
+          mountPath: /conf/janusgraph-server.yaml
+          subPath: janusgraph-server.yaml
+        - name: config
+          mountPath: /conf/janusgraph-credentials.properties
+          subPath: janusgraph-credentials.properties
+        - name: config
+          mountPath: /conf/remote.yaml
+          subPath: remote.yaml
+
+      containers:
+      - name: janusgraph
+        image: {{ .Values.janusgraph.repository }}:{{ .Values.janusgraph.tag }}
+        imagePullPolicy: {{ .Values.janusgraph.pullPolicy }}
+        args:
+          - /etc/opt/janusgraph-s1/janusgraph-server.yaml
+
+        {{- with .Values.janusgraph.ports }}
+        ports:
+          {{- toYaml . | nindent 10 }}
+        {{ end }}
+
+        {{- with .Values.janusgraph.securityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{ end }}
+
+        {{- with .Values.janusgraph.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{ end }}
+
+        {{- with .Values.janusgraph.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{ end }}
+
+        {{- with .Values.janusgraph.startupProbe }}
+        startupProbe:
+          {{- toYaml . | nindent 10 }}
+        {{ end }}
+
+        {{- with .Values.janusgraph.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{ end }}
+
+        env:
+          {{- if and .Values.opensearch.enabled .Values.opensearch.credsSecretName }}
+          - name: OPENSEARCH_USER
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.opensearch.credsSecretName }}
+                key: ADMIN_USERNAME
+          - name: OPENSEARCH_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.opensearch.credsSecretName }}
+                key: ADMIN_PASSWORD
+          {{ end }}
+
+          {{- if and .Values.cassandra.enabled .Values.cassandra.cassandra.auth.superuser.secret }}
+          - name: CASSANDRA_USER
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.cassandra.cassandra.auth.superuser.secret }}
+                key: username
+          - name: CASSANDRA_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.cassandra.cassandra.auth.superuser.secret }}
+                key: password
+          {{ end }}
+
+          {{- if .Values.janusgraph.auth.enabled }}
+          - name: JANUSGRAPH_USER
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "janusgraph.fullname" . }}
+                key: JANUSGRAPH_USER
+          - name: JANUSGRAPH_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "janusgraph.fullname" . }}
+                key: JANUSGRAPH_PASSWORD
+          - name: JANUSGRAPH_HMAC_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "janusgraph.fullname" . }}
+                key: JANUSGRAPH_HMAC_SECRET
+          {{ end }}
+
+          {{- tpl .Values.janusgraph.env . | nindent 10 }}
+
+        volumeMounts:
+          - name: config
+            mountPath: /opt/janusgraph/prometheus/config.yml
+            subPath: jmx-config.yaml
+
+          - name: config
+            mountPath: /opt/janusgraph/scripts/readiness.groovy
+            subPath: readiness.groovy
+
+          - mountPath: /opt/janusgraph/conf/log4j2-console.xml
+            name: config
+            subPath: log4j2.xml
+
+          - mountPath: /opt/janusgraph/conf/log4j2-server.xml
+            name: config
+            subPath: log4j2.xml
+
+          - name: config-folder
+            mountPath: /configs
+
+      - name: gui
+        image: {{ .Values.gui.repository }}:{{ .Values.gui.tag }}
+        imagePullPolicy: {{ .Values.gui.pullPolicy }}
+        ports:
+        - name: gui
+          protocol: TCP
+          containerPort: 80
+
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "janusgraph.fullname" . }}
+            defaultMode: 0666
+        - name: config-folder
+          emptyDir: {}
+
+      restartPolicy: Always
+
